@@ -1,2 +1,2 @@
 # AntiVmtWorm
-Detects and removes the `Harmony.PatchInfo.bin` resource hidden inside of this common worm.
+Detects and removes any embedded resource that ends in `.bin` for security.

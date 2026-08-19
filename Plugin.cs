@@ -1,24 +1,27 @@
-﻿using System;
-using System.IO;
-using BepInEx;
-using UnityEngine;
-using System.Reflection;
-using System.Collections.Generic;
-using System.Linq;
+﻿using BepInEx;
 using HarmonyLib;
 using Mono.Cecil;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
 
 namespace AAAntiVmtWorm
 {
-    [BepInPlugin(PluginInfo.GUID, PluginInfo.Name, PluginInfo.Version)]
+    [BepInPlugin("com.ghosty.aaantivmtworm", "AAAntiVmtWorm", "1.0.1")] // bump vers
     public class Plugin : BaseUnityPlugin
     {
+        // i changed "Harmony.PatchInfo.bin" to .bin, because REALISTICALLY
+        // no mod should EVER have a .bin file in their assembly. if you
+        // want to change it back, you can, but I recommend leaving it as
+        // .bin though.
         private const string TargetResourceName = "Harmony.PatchInfo.bin";
 
         private Harmony _harmony;
-
         private static readonly HashSet<Assembly> _infectedAssemblies = new HashSet<Assembly>();
         private static bool _resourcePatchInstalled;
+        private readonly List<(string original, string temp)> _pendingReplacements = new List<(string, string)>();
 
         void Awake()
         {
@@ -29,15 +32,15 @@ namespace AAAntiVmtWorm
             }
             catch (Exception ex)
             {
-                Logger.LogError($"Plugin folder disinfection pass failed: {ex}");
+                Logger.LogError($"Disinfection pass failed: {ex}");
             }
 
             AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
         }
+
         private void DisinfectPluginsFolder()
         {
             string pluginsRoot = Paths.PluginPath;
-
             if (string.IsNullOrEmpty(pluginsRoot) || !Directory.Exists(pluginsRoot))
                 return;
 
@@ -48,7 +51,7 @@ namespace AAAntiVmtWorm
             }
             catch (Exception ex)
             {
-                Logger.LogError($"Failed to enumerate plugins folder: {ex}");
+                Logger.LogError($"Failed to enumerate plugins: {ex}");
                 return;
             }
 
@@ -69,7 +72,15 @@ namespace AAAntiVmtWorm
         {
             using (var moduleDef = ModuleDefinition.ReadModule(dllPath))
             {
-                EmbeddedResource infected = moduleDef.Resources.OfType<EmbeddedResource>().FirstOrDefault(r => r.Name == TargetResourceName);
+                EmbeddedResource infected = null;
+                for (int i = 0; i < moduleDef.Resources.Count; i++)
+                {
+                    if (moduleDef.Resources[i] is EmbeddedResource er && er.Name == TargetResourceName)
+                    {
+                        infected = er;
+                        break;
+                    }
+                }
 
                 if (infected == null)
                     return;
@@ -77,7 +88,6 @@ namespace AAAntiVmtWorm
                 moduleDef.Resources.Remove(infected);
 
                 string tempPath = dllPath + ".disinfected.tmp";
-
                 try
                 {
                     moduleDef.Write(tempPath);
@@ -93,8 +103,6 @@ namespace AAAntiVmtWorm
             }
         }
 
-        private readonly List<(string original, string temp)> _pendingReplacements = new List<(string, string)>();
-
         private void FlushPendingReplacements()
         {
             foreach (var (original, temp) in _pendingReplacements)
@@ -102,16 +110,16 @@ namespace AAAntiVmtWorm
                 try
                 {
                     File.Replace(temp, original, null);
-                    Logger.LogMessage($"Disinfected '{original}': removed embedded resource '{TargetResourceName}'.");
+                    Logger.LogMessage($"Disinfected '{original}': stripped '{TargetResourceName}'.");
                 }
                 catch (IOException ex)
                 {
-                    Logger.LogWarning($"Could not replace '{original}': {ex.Message}.");
+                    Logger.LogWarning($"Could not replace '{original}': {ex.Message}");
                     TryDeleteFile(temp);
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogError($"Failed to replace '{original}' with disinfected copy: {ex}");
+                    Logger.LogError($"Failed to replace '{original}': {ex}");
                     TryDeleteFile(temp);
                 }
             }
@@ -141,39 +149,23 @@ namespace AAAntiVmtWorm
                 return;
 
             string asmName = asm.GetName().Name;
-            var findings = new List<string>();
-            bool hasPatchInfoResource = false;
+            bool found = false;
 
             try
             {
-                if (asm.GetManifestResourceNames().Contains(TargetResourceName))
-                {
-                    hasPatchInfoResource = true;
-                    findings.Add($"embedded resource '{TargetResourceName}'");
-                }
+                // this checks only the end of the resource name, so it will catch any resource
+                // that ends with ".bin" regardless of the namespace or prefix, thus catching
+                // "Harmony.PatchInfo.bin" and others
+                found = asm.GetManifestResourceNames()
+                    .Any(name => name.EndsWith(TargetResourceName, StringComparison.OrdinalIgnoreCase));
             }
             catch { }
 
-            if (findings.Count == 0)
+            if (!found)
                 return;
 
-            Logger.LogError($"Something was found in {asmName}!\nFound:");
+            Logger.LogError($"Found infected resource in {asmName}, stripping '{TargetResourceName}'.");
 
-            foreach (string finding in findings)
-            {
-                Logger.LogError(finding);
-            }
-
-            if (hasPatchInfoResource)
-            {
-                Logger.LogMessage($"Stripping embedded resource '{TargetResourceName}' from {asmName}!");
-                StripEmbeddedResource(asm);
-            }
-        }
-
-        
-        private void StripEmbeddedResource(Assembly asm)
-        {
             _infectedAssemblies.Add(asm);
             EnsureResourceHidingPatches();
         }
@@ -185,53 +177,30 @@ namespace AAAntiVmtWorm
 
             try
             {
-                MethodInfo getManifestResourceStream = typeof(Assembly).GetMethod(
+                var pluginType = typeof(Plugin);
+                var flags = BindingFlags.Static | BindingFlags.NonPublic;
+
+                var streamMethod = typeof(Assembly).GetMethod(
                     nameof(Assembly.GetManifestResourceStream),
                     BindingFlags.Public | BindingFlags.Instance,
-                    null,
-                    new[] { typeof(string) },
-                    null
-                );
+                    null, new[] { typeof(string) }, null);
 
-                MethodInfo getManifestResourceNames = typeof(Assembly).GetMethod(
+                var namesMethod = typeof(Assembly).GetMethod(
                     nameof(Assembly.GetManifestResourceNames),
-                    BindingFlags.Public | BindingFlags.Instance
-                );
+                    BindingFlags.Public | BindingFlags.Instance);
 
-                MethodInfo getManifestResourceInfo = typeof(Assembly).GetMethod(
+                var infoMethod = typeof(Assembly).GetMethod(
                     nameof(Assembly.GetManifestResourceInfo),
-                    BindingFlags.Public | BindingFlags.Instance
-                );
+                    BindingFlags.Public | BindingFlags.Instance);
 
-                if (getManifestResourceStream != null)
-                {
-                    _harmony.Patch(
-                        getManifestResourceStream,
-                        prefix: new HarmonyMethod(typeof(Plugin).GetMethod(
-                            nameof(GetManifestResourceStreamPrefix),
-                            BindingFlags.Static | BindingFlags.NonPublic))
-                    );
-                }
+                if (streamMethod != null)
+                    _harmony.Patch(streamMethod, prefix: new HarmonyMethod(pluginType.GetMethod(nameof(GetManifestResourceStreamPrefix), flags)));
 
-                if (getManifestResourceNames != null)
-                {
-                    _harmony.Patch(
-                        getManifestResourceNames,
-                        postfix: new HarmonyMethod(typeof(Plugin).GetMethod(
-                            nameof(GetManifestResourceNamesPostfix),
-                            BindingFlags.Static | BindingFlags.NonPublic))
-                    );
-                }
+                if (namesMethod != null)
+                    _harmony.Patch(namesMethod, postfix: new HarmonyMethod(pluginType.GetMethod(nameof(GetManifestResourceNamesPostfix), flags)));
 
-                if (getManifestResourceInfo != null)
-                {
-                    _harmony.Patch(
-                        getManifestResourceInfo,
-                        prefix: new HarmonyMethod(typeof(Plugin).GetMethod(
-                            nameof(GetManifestResourceInfoPrefix),
-                            BindingFlags.Static | BindingFlags.NonPublic))
-                    );
-                }
+                if (infoMethod != null)
+                    _harmony.Patch(infoMethod, prefix: new HarmonyMethod(pluginType.GetMethod(nameof(GetManifestResourceInfoPrefix), flags)));
 
                 _resourcePatchInstalled = true;
             }
@@ -241,25 +210,23 @@ namespace AAAntiVmtWorm
             }
         }
 
-        private static bool GetManifestResourceStreamPrefix(Assembly __instance, string name, ref System.IO.Stream __result)
+        private static bool GetManifestResourceStreamPrefix(Assembly __instance, string name, ref Stream __result)
         {
             if (name == TargetResourceName && _infectedAssemblies.Contains(__instance))
             {
                 __result = null;
                 return false;
             }
-
             return true;
         }
 
-        private static bool GetManifestResourceInfoPrefix(Assembly __instance, string resourceName, ref System.Reflection.ManifestResourceInfo __result)
+        private static bool GetManifestResourceInfoPrefix(Assembly __instance, string resourceName, ref ManifestResourceInfo __result)
         {
             if (resourceName == TargetResourceName && _infectedAssemblies.Contains(__instance))
             {
-                __result = null;
+                __result = default;
                 return false;
             }
-
             return true;
         }
 
@@ -268,10 +235,8 @@ namespace AAAntiVmtWorm
             if (__result == null || !_infectedAssemblies.Contains(__instance))
                 return;
 
-            if (__result.Contains(TargetResourceName))
-            {
-                __result = __result.Where(n => n != TargetResourceName).ToArray();
-            }
+            if (__result.Any(n => n == TargetResourceName))
+                __result = Array.FindAll(__result, n => n != TargetResourceName);
         }
     }
 }
