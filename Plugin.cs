@@ -16,7 +16,7 @@ namespace AAAntiVmtWorm
         // no mod should EVER have a .bin file in their assembly. if you
         // want to change it back, you can, but I recommend leaving it as
         // .bin though.
-        private const string TargetResourceName = "Harmony.PatchInfo.bin";
+        private const string TargetResourceName = ".bin";
 
         private Harmony _harmony;
         private static readonly HashSet<Assembly> _infectedAssemblies = new HashSet<Assembly>();
@@ -25,6 +25,9 @@ namespace AAAntiVmtWorm
 
         void Awake()
         {
+            // init the harmony so it works
+            _harmony = new Harmony("com.ghosty.aaantivmtworm");
+        
             try
             {
                 DisinfectPluginsFolder();
