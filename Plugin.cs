@@ -1,4 +1,4 @@
-﻿using BepInEx;
+using BepInEx;
 using HarmonyLib;
 using Mono.Cecil;
 using System;
@@ -75,20 +75,16 @@ namespace AAAntiVmtWorm
         {
             using (var moduleDef = ModuleDefinition.ReadModule(dllPath))
             {
-                EmbeddedResource infected = null;
-                for (int i = 0; i < moduleDef.Resources.Count; i++)
-                {
-                    if (moduleDef.Resources[i] is EmbeddedResource er && er.Name == TargetResourceName)
-                    {
-                        infected = er;
-                        break;
-                    }
-                }
+                var infected = moduleDef.Resources
+                    .OfType<EmbeddedResource>()
+                    .Where(er => er.Name.EndsWith(TargetResourceName, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
 
-                if (infected == null)
+                if (infected.Count == 0)
                     return;
 
-                moduleDef.Resources.Remove(infected);
+                foreach (var resource in infected)
+                    moduleDef.Resources.Remove(resource);
 
                 string tempPath = dllPath + ".disinfected.tmp";
                 try
@@ -215,7 +211,7 @@ namespace AAAntiVmtWorm
 
         private static bool GetManifestResourceStreamPrefix(Assembly __instance, string name, ref Stream __result)
         {
-            if (name == TargetResourceName && _infectedAssemblies.Contains(__instance))
+            if (name.EndsWith(TargetResourceName, StringComparison.OrdinalIgnoreCase) && _infectedAssemblies.Contains(__instance))
             {
                 __result = null;
                 return false;
@@ -225,7 +221,7 @@ namespace AAAntiVmtWorm
 
         private static bool GetManifestResourceInfoPrefix(Assembly __instance, string resourceName, ref ManifestResourceInfo __result)
         {
-            if (resourceName == TargetResourceName && _infectedAssemblies.Contains(__instance))
+            if (resourceName.EndsWith(TargetResourceName, StringComparison.OrdinalIgnoreCase) && _infectedAssemblies.Contains(__instance))
             {
                 __result = default;
                 return false;
@@ -238,8 +234,8 @@ namespace AAAntiVmtWorm
             if (__result == null || !_infectedAssemblies.Contains(__instance))
                 return;
 
-            if (__result.Any(n => n == TargetResourceName))
-                __result = Array.FindAll(__result, n => n != TargetResourceName);
+            if (__result.Any(n => n.EndsWith(TargetResourceName, StringComparison.OrdinalIgnoreCase)))
+                __result = Array.FindAll(__result, n => !n.EndsWith(TargetResourceName, StringComparison.OrdinalIgnoreCase));
         }
     }
 }
